@@ -61,57 +61,57 @@ class TestModelsList:
         with _patch_fetch() as mock_fetch:
             result = runner.invoke(cli_app, ["registry", "models", "list"])
 
-        assert result.exit_code == 0
-        assert mock_fetch.called
-        assert "c-sonnet" in result.output
-        assert "GPT-4o" in result.output
-        assert "(deprecated)" in result.output
-        assert "models.dev" in result.output
-        assert "count: 4" in result.output
+            assert result.exit_code == 0
+            assert mock_fetch.called
+            assert "c-sonnet" in result.output
+            assert "GPT-4o" in result.output
+            assert "(deprecated)" in result.output
+            assert "models.dev" in result.output
+            assert "count: 4" in result.output
 
     def test_list_models_json(self):
         """Test JSON output mode."""
         with _patch_fetch():
             result = runner.invoke(cli_app, ["registry", "models", "list", "--output", "json"])
 
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert len(data) == 4
-        assert data[0]["model_id"] == "c-sonnet"
-        assert data[3]["model_id"] == "malformed-model"
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert len(data) == 4
+            assert data[0]["model_id"] == "c-sonnet"
+            assert data[3]["model_id"] == "malformed-model"
 
     def test_list_models_plain(self):
         """Test plain output mode."""
         with _patch_fetch():
             result = runner.invoke(cli_app, ["registry", "models", "list", "--output", "plain"])
 
-        assert result.exit_code == 0
-        # Check standard layout with ID, provider, display name, and IDEs
-        assert "c-sonnet" in result.output
-        assert "anthropic" in result.output
-        assert "Claude 3.5" in result.output
-        assert "claude-code,cursor" in result.output
-        assert "legacy-model" in result.output
-        assert "malformed-model" in result.output
+            assert result.exit_code == 0
+            # Check standard layout with ID, provider, display name, and IDEs
+            assert "c-sonnet" in result.output
+            assert "anthropic" in result.output
+            assert "Claude 3.5" in result.output
+            assert "claude-code,cursor" in result.output
+            assert "legacy-model" in result.output
+            assert "malformed-model" in result.output
 
     def test_list_models_filter_ide(self):
         """Test filtering by IDE."""
         with _patch_fetch():
             result = runner.invoke(cli_app, ["registry", "models", "list", "--ide", "claude-code"])
 
-        assert result.exit_code == 0
-        assert "c-sonnet" in result.output
-        assert "GPT-4o" not in result.output
-        # Count should reflect the filtered result
-        assert "count: 1" in result.output
+            assert result.exit_code == 0
+            assert "c-sonnet" in result.output
+            assert "GPT-4o" not in result.output
+            # Count should reflect the filtered result
+            assert "count: 1" in result.output
 
     def test_list_models_refresh(self):
         """Test refresh flag is passed down to fetch_catalog."""
         with _patch_fetch() as mock_fetch:
             result = runner.invoke(cli_app, ["registry", "models", "list", "--refresh"])
 
-        assert result.exit_code == 0
-        mock_fetch.assert_called_once_with(refresh=True)
+            assert result.exit_code == 0
+            mock_fetch.assert_called_once_with(refresh=True)
 
     def test_list_models_degraded(self):
         """Test degraded indicator is shown."""
@@ -122,14 +122,47 @@ class TestModelsList:
         with _patch_fetch(degraded_catalog):
             result = runner.invoke(cli_app, ["registry", "models", "list"])
 
-        assert result.exit_code == 0
-        assert "(degraded — using snapshot)" in result.output
-        assert "source: local_cache" in result.output
+            assert result.exit_code == 0
+            assert "(degraded — using snapshot)" in result.output
+            assert "source: local_cache" in result.output
 
     def test_list_models_empty(self):
         """Test empty catalog handles gracefully."""
         with _patch_fetch({"models": []}):
             result = runner.invoke(cli_app, ["registry", "models", "list"])
 
-        assert result.exit_code == 0
-        assert "No models found." in result.output
+            assert result.exit_code == 0
+            assert "No models found." in result.output
+
+    def test_list_models_fetch_catalog_error(self):
+        """Test that fetch_catalog exceptions are handled gracefully (non-zero exit)."""
+        def _raise_error(*_a, **_kw):
+            raise Exception("Network error: connection timeout")
+
+        with patch("observal_cli.cmd_models.model_catalog.fetch_catalog", side_effect=_raise_error):
+            result = runner.invoke(cli_app, ["registry", "models", "list"])
+
+            assert result.exit_code != 0
+            assert "Network error" in (result.output or str(result.exception))
+
+    def test_list_models_ide_no_matches(self):
+        """Test --ide with value matching no models (catalog populated, but IDE has no matches)."""
+        with _patch_fetch():
+            result = runner.invoke(cli_app, ["registry", "models", "list", "--ide", "kiro"])
+
+            assert result.exit_code == 0
+            # Catalog has 4 models but none support 'kiro' IDE
+            assert "No models found." in result.output
+
+    def test_list_models_output_invalid(self):
+        """Test --output with invalid value falls back to default table rendering.
+
+        Invalid output formats (e.g., 'xml') are not validated client-side.
+        The CLI silently falls back to table rendering.
+        """
+        with _patch_fetch():
+            result = runner.invoke(cli_app, ["registry", "models", "list", "--output", "xml"])
+
+            # Invalid output falls back to default table rendering
+            assert result.exit_code == 0
+            assert "c-sonnet" in result.output
