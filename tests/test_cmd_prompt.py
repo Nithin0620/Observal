@@ -91,7 +91,7 @@ class TestPromptSubmit:
             "description": "JSON desc",
             "owner": "jsonowner",
             "category": "utility",
-            "template": "JSON {{template}}"
+            "template": "JSON {{template}}",
         }
         prompt_json.write_text(json.dumps(payload))
 
@@ -114,7 +114,7 @@ class TestPromptList:
         """Test prompt list command output."""
         mock_data = [
             {"id": "p1", "name": "prompt-one", "version": "1.0.0", "status": "approved", "owner": "user1"},
-            {"id": "p2", "name": "prompt-two", "version": "1.1.0", "status": "approved", "owner": "user2"}
+            {"id": "p2", "name": "prompt-two", "version": "1.1.0", "status": "approved", "owner": "user2"},
         ]
         with _patch_get(mock_data), patch("observal_cli.config.save_last_results"):
             result = runner.invoke(cli_app, ["prompt", "list"])
@@ -136,7 +136,7 @@ class TestPromptShow:
             "description": "A test prompt",
             "category": "coding",
             "created_at": "2026-05-14T00:00:00Z",
-            "template": "Hello {{world}}"
+            "template": "Hello {{world}}",
         }
         with _patch_resolve_alias(), _patch_get(mock_data):
             result = runner.invoke(cli_app, ["prompt", "show", "p123"])
@@ -246,6 +246,7 @@ class TestPromptEdgeCases:
 
     def test_install_api_error(self):
         """API errors during install should propagate as failures (non-zero exit)."""
+
         def _raise(*_a, **_kw):
             raise Exception("500 Internal")
 
