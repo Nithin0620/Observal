@@ -13,12 +13,13 @@ from datetime import datetime as dt
 import structlog
 from fastapi import APIRouter, Depends, Query
 from fastapi_cache.decorator import cache
+from loguru import logger as optic
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import services.dynamic_settings as ds
 from api.deps import get_db, require_role
 from api.sanitize import escape_like
-from config import settings
 from models.agent import Agent, AgentStatus, AgentVersion
 from models.agent_component import AgentComponent
 from models.download import AgentDownloadRecord
@@ -39,11 +40,6 @@ from schemas.dashboard import (
     LatencyCell,
     LeaderboardItem,
     OverviewStats,
-    RagasDimensionScore,
-    RagasEvalRequest,
-    RagasEvalResponse,
-    RagasScores,
-    RagasSpanResult,
     RelevanceBucket,
     SandboxRun,
     SandboxStats,
@@ -99,11 +95,12 @@ async def _ch_json_scoped(sql: str, current_user, params: dict | None = None) ->
 
 
 @router.get("/overview/stats", response_model=OverviewStats)
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def overview_stats(
     range_: str | None = Query(None, alias="range"),
     db: AsyncSession = Depends(get_db),
 ):
+    optic.debug("overview_stats: range={}", range_)
     total_mcps = (
         await db.scalar(
             select(func.count(McpListing.id))
@@ -142,8 +139,9 @@ async def overview_stats(
 
 
 @router.get("/overview/top-mcps", response_model=list[TopItem])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def top_mcps(db: AsyncSession = Depends(get_db)):
+    optic.debug("top_mcps called")
     result = await db.execute(
         select(McpDownload.listing_id, func.count(McpDownload.id).label("cnt"), McpListing.name)
         .join(McpListing, McpDownload.listing_id == McpListing.id)
@@ -155,7 +153,7 @@ async def top_mcps(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/overview/top-agents", response_model=list[TopAgentItem])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def top_agents(
     limit: int = Query(6, le=50),
     db: AsyncSession = Depends(get_db),
@@ -204,7 +202,7 @@ async def top_agents(
 
 
 @router.get("/overview/leaderboard", response_model=list[LeaderboardItem])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def agent_leaderboard(
     window: str = Query("7d", pattern="^(24h|7d|30d|all)$"),
     limit: int = Query(20, le=50),
@@ -318,7 +316,7 @@ async def agent_leaderboard(
 
 
 @router.get("/overview/component-leaderboard", response_model=list[ComponentLeaderboardItem])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def component_leaderboard(
     window: str = Query("7d", pattern="^(24h|7d|30d|all)$"),
     limit: int = Query(20, le=50),
@@ -464,7 +462,7 @@ async def component_leaderboard(
 
 
 @router.get("/overview/trends", response_model=list[TrendPoint])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def trends(
     range_: str | None = Query(None, alias="range"),
     db: AsyncSession = Depends(get_db),
@@ -501,7 +499,7 @@ async def trends(
 
 
 @router.get("/dashboard/tokens", response_model=TokenStats)
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def token_stats(
     range_: str | None = Query(None, alias="range"),
     db: AsyncSession = Depends(get_db),
@@ -650,7 +648,7 @@ async def token_stats(
 
 
 @router.get("/dashboard/ide-usage", response_model=IdeUsage)
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def ide_usage(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.admin)),
@@ -687,7 +685,7 @@ async def ide_usage(
 
 
 @router.get("/dashboard/sandbox-metrics", response_model=SandboxStats)
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def sandbox_metrics(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.admin)),
@@ -762,7 +760,7 @@ async def sandbox_metrics(
 
 
 @router.get("/dashboard/graphrag-metrics", response_model=GraphRagStats)
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def graphrag_metrics(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.admin)),
@@ -828,81 +826,12 @@ async def graphrag_metrics(
 
 
 # ---------------------------------------------------------------------------
-# RAGAS evaluation for GraphRAGs
-# ---------------------------------------------------------------------------
-
-
-@router.post("/dashboard/graphrag-ragas-eval", response_model=RagasEvalResponse)
-async def run_graphrag_ragas_eval(
-    req: RagasEvalRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.admin)),
-):
-    """Run RAGAS evaluation on recent retrieval spans for a GraphRAG."""
-    from services.eval.ragas_eval import run_ragas_on_graphrag
-
-    result = await run_ragas_on_graphrag(
-        graphrag_id=req.graphrag_id,
-        limit=req.limit,
-        ground_truths=req.ground_truths,
-    )
-    avgs = result.get("averages", {})
-    await audit(
-        current_user,
-        "dashboard.graphrag_ragas_eval",
-        resource_type="dashboard",
-        detail=f"RAGAS eval on graphrag_id={req.graphrag_id}",
-    )
-    return RagasEvalResponse(
-        spans_evaluated=result["spans_evaluated"],
-        scores=[RagasSpanResult(**s) for s in result["scores"]],
-        averages=RagasScores(
-            faithfulness=RagasDimensionScore(avg=avgs.get("faithfulness"), count=result["spans_evaluated"]),
-            answer_relevancy=RagasDimensionScore(avg=avgs.get("answer_relevancy"), count=result["spans_evaluated"]),
-            context_precision=RagasDimensionScore(avg=avgs.get("context_precision"), count=result["spans_evaluated"]),
-            context_recall=RagasDimensionScore(avg=avgs.get("context_recall"), count=result["spans_evaluated"]),
-        ),
-    )
-
-
-@router.get("/dashboard/graphrag-ragas-scores", response_model=RagasScores)
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
-async def graphrag_ragas_scores(
-    graphrag_id: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.admin)),
-):
-    """Get previously computed RAGAS scores. If graphrag_id is provided, scoped to that GraphRAG; otherwise aggregate."""
-    if graphrag_id:
-        from services.eval.ragas_eval import get_ragas_scores
-
-        avgs = await get_ragas_scores(graphrag_id)
-    else:
-        from services.eval.ragas_eval import get_ragas_aggregate
-
-        avgs = await get_ragas_aggregate()
-
-    await audit(
-        current_user,
-        "dashboard.graphrag_ragas_scores",
-        resource_type="dashboard",
-        detail=f"graphrag_id={graphrag_id}" if graphrag_id else "aggregate",
-    )
-    return RagasScores(
-        faithfulness=RagasDimensionScore(**avgs.get("faithfulness", {"avg": None, "count": 0})),
-        answer_relevancy=RagasDimensionScore(**avgs.get("answer_relevancy", {"avg": None, "count": 0})),
-        context_precision=RagasDimensionScore(**avgs.get("context_precision", {"avg": None, "count": 0})),
-        context_recall=RagasDimensionScore(**avgs.get("context_recall", {"avg": None, "count": 0})),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Latency heatmap
 # ---------------------------------------------------------------------------
 
 
 @router.get("/dashboard/latency-heatmap", response_model=list[LatencyCell])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def latency_heatmap(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.admin)),
@@ -940,7 +869,7 @@ async def latency_heatmap(
 
 
 @router.get("/dashboard/unannotated-traces", response_model=list[UnannotatedTrace])
-@cache(expire=settings.CACHE_TTL_DASHBOARD, namespace="dashboard")
+@cache(expire=ds.get_sync_int("data.cache_ttl_dashboard", 60), namespace="dashboard")
 async def unannotated_traces(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.admin)),

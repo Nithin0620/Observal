@@ -3,38 +3,48 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-License-Identifier: AGPL-3.0-only
 
-from importlib.metadata import version as pkg_version
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Request
+from loguru import logger as optic
 from sqlalchemy import select
 
 from api.deps import get_db
 from config import settings
 from models.enterprise_config import EnterpriseConfig
+from version import get_server_version
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
 
 
-def _server_version() -> str:
-    try:
-        return pkg_version("observal-server")
-    except Exception:
-        return "dev"
-
-
 @router.get("/version")
 async def get_version():
-    """Server version and minimum compatible CLI version. No auth required."""
+    """Server version and compatibility info. No auth required."""
+    optic.debug("config.get_version called")
+    import services.dynamic_settings as ds
+
+    max_cli = await ds.get("misc.max_cli_version")
+    api_version = await ds.get("misc.api_version")
+    frontend_version = await ds.get("misc.frontend_version")
+    recommended_cli = await ds.get("misc.recommended_cli_version")
+
+    server_ver = get_server_version()
     return {
-        "server_version": _server_version(),
-        "min_cli_version": settings.MIN_CLI_VERSION,
+        "server_version": server_ver,
+        "max_cli_version": max_cli or None,
+        "api_version": api_version or None,
+        "frontend_version": frontend_version or server_ver,
+        "recommended_cli_version": recommended_cli or server_ver,
     }
 
 
-def derive_endpoints(request: Request | None = None) -> dict[str, str]:
+async def derive_endpoints(request: Request | None = None) -> dict[str, str]:
     """Derive all endpoint URLs from settings, falling back to request context."""
-    public_url = settings.PUBLIC_URL.rstrip("/") if settings.PUBLIC_URL else ""
+    optic.debug("derive_endpoints called")
+    import services.dynamic_settings as ds
+
+    public_url_setting = await ds.get("deployment.public_url")
+    public_url = public_url_setting.rstrip("/") if public_url_setting else ""
     if not public_url and request:
         public_url = str(request.base_url).rstrip("/")
     if not public_url:
@@ -44,28 +54,37 @@ def derive_endpoints(request: Request | None = None) -> dict[str, str]:
     hostname = parsed.hostname or "localhost"
     scheme = parsed.scheme or ("http" if hostname in ("localhost", "127.0.0.1") else "https")
 
-    otlp_http = settings.OTLP_HTTP_URL.rstrip("/") if settings.OTLP_HTTP_URL else public_url
-    web = settings.FRONTEND_URL.rstrip("/") if settings.FRONTEND_URL else f"{scheme}://{hostname}:3000"
+    frontend_setting = await ds.get("deployment.frontend_url")
+    web = frontend_setting.rstrip("/") if frontend_setting else f"{scheme}://{hostname}:3000"
 
     return {
         "api": public_url,
-        "otlp_http": otlp_http,
         "web": web,
     }
 
 
 @router.get("/endpoints")
 async def get_endpoints(request: Request):
-    """Endpoint discovery — returns all service URLs. No auth required."""
-    return derive_endpoints(request)
+    """Endpoint discovery: returns all service URLs. No auth required."""
+    optic.debug("config.derive_endpoints called")
+    return await derive_endpoints(request)
 
 
 @router.get("/public")
 async def get_public_config(db=Depends(get_db)):
     """Public configuration for frontend. No auth required."""
-    saml_enabled = bool(settings.SAML_IDP_ENTITY_ID and settings.SAML_IDP_SSO_URL)
+    optic.debug("config.get_public_config called")
+    import services.dynamic_settings as ds
 
-    if not saml_enabled and settings.DEPLOYMENT_MODE == "enterprise":
+    # Deployment mode is a boot-time env var (controls route registration)
+    deployment_mode = settings.DEPLOYMENT_MODE
+
+    # SAML: check DB-backed dynamic settings, then fall back to SamlConfig model
+    saml_idp_entity = await ds.get("saml.idp_entity_id")
+    saml_idp_sso = await ds.get("saml.idp_sso_url")
+    saml_enabled = bool(saml_idp_entity and saml_idp_sso)
+
+    if not saml_enabled and deployment_mode == "enterprise":
         try:
             from models.saml_config import SamlConfig
 
@@ -93,15 +112,23 @@ async def get_public_config(db=Depends(get_db)):
     except Exception:
         pass
 
+    # Feature availability derived from license, no env var
     from services.insights import INSIGHTS_AVAILABLE
+    from services.insights import licensed_features as _get_licensed
+
+    licensed_features: list[str] = _get_licensed()
+    exec_dashboard_available = "all" in licensed_features or "exec_dashboard" in licensed_features
+
+    sso_only = await ds.get_bool("deployment.sso_only")
 
     return {
-        "deployment_mode": settings.DEPLOYMENT_MODE,
+        "deployment_mode": deployment_mode,
         "sso_enabled": bool(settings.OAUTH_CLIENT_ID),
-        "sso_only": settings.SSO_ONLY,
+        "sso_only": sso_only,
         "saml_enabled": saml_enabled,
-        "eval_configured": bool(settings.EVAL_MODEL_NAME),
         "insights_available": INSIGHTS_AVAILABLE,
+        "exec_dashboard_available": exec_dashboard_available,
+        "licensed_features": licensed_features,
         "branding_logo": branding_logo,
         "branding_app_name": branding_app_name,
         "branding_wordmark": branding_wordmark,

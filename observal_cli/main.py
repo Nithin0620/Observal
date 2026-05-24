@@ -10,6 +10,7 @@
 
 """Observal CLI: MCP Server & Agent Registry."""
 
+import atexit
 import logging
 import os
 import sys
@@ -84,6 +85,10 @@ def main(
     debug: bool = typer.Option(False, "--debug", help="Debug logging"),
 ):
     """Observal: MCP Server & Agent Registry CLI"""
+    from observal_cli.optic import setup_optic
+
+    setup_optic(debug=debug, verbose=verbose)
+
     if debug:
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
     elif verbose:
@@ -96,6 +101,8 @@ from observal_cli.cmd_agent import agent_app
 from observal_cli.cmd_auth import auth_app, register_config
 from observal_cli.cmd_component import component_app
 from observal_cli.cmd_doctor import doctor_app
+from observal_cli.cmd_hook import hook_app
+from observal_cli.cmd_logs import logs_app
 from observal_cli.cmd_mcp import mcp_app
 from observal_cli.cmd_migrate import migrate_app
 from observal_cli.cmd_models import models_app
@@ -114,7 +121,7 @@ from observal_cli.cmd_support import support_app
 from observal_cli.cmd_uninstall import register_uninstall
 
 # ═══════════════════════════════════════════════════════════
-# registry_app — Component registry parent group
+# registry_app: Component registry parent group
 # ═══════════════════════════════════════════════════════════
 
 registry_app = typer.Typer(
@@ -125,6 +132,7 @@ registry_app = typer.Typer(
 
 registry_app.add_typer(mcp_app, name="mcp")
 registry_app.add_typer(skill_app, name="skill")
+registry_app.add_typer(hook_app, name="hook")
 registry_app.add_typer(prompt_app, name="prompt")
 registry_app.add_typer(sandbox_app, name="sandbox")
 registry_app.add_typer(models_app, name="models")
@@ -155,7 +163,65 @@ app.add_typer(self_app, name="self")
 app.add_typer(doctor_app, name="doctor")
 app.add_typer(support_app, name="support")
 app.add_typer(migrate_app, name="migrate")
+app.add_typer(logs_app, name="logs")
 
+# Server management (embedded + Docker)
+try:
+    from observal_cli.cmd_server import server_app
+
+    app.add_typer(server_app, name="server")
+except ImportError:
+    pass  # server deps not installed
+
+
+def _show_update_banner() -> None:
+    """Post-command hook: show update notification if available.
+
+    Only on interactive TTY, never during self/server commands, never in CI.
+    If connected to a server (enterprise): targets the server's version.
+    Otherwise: targets the latest GitHub release.
+    """
+    import sys as _sys
+
+    if not (_sys.stdout.isatty() and _sys.stderr.isatty()):
+        return
+    if len(_sys.argv) > 1 and _sys.argv[1] in ("self", "server"):
+        return
+    if os.environ.get("CI") or os.environ.get("OBSERVAL_NO_UPDATE_CHECK"):
+        return
+
+    try:
+        from observal_cli.version_check import maybe_check
+
+        update = maybe_check()
+        if not update:
+            return
+
+        from rich import print as _rprint
+
+        if update.source == "server":
+            if update.direction == "downgrade":
+                _rprint(
+                    f"\n[yellow]Your server recommends v{update.latest}. "
+                    f"Downgrade: [bold]observal self downgrade --version {update.latest}[/bold][/yellow]"
+                )
+            else:
+                _rprint(
+                    f"\n[dim]Your server is v{update.latest}. "
+                    f"Match it: [bold]observal self upgrade --version {update.latest}[/bold][/dim]"
+                )
+        else:
+            _rprint(
+                f"\n[dim]Update available: v{update.current} \u2192 "
+                f"[green]v{update.latest}[/green] \u2022 "
+                f"[bold]observal self upgrade[/bold][/dim]"
+            )
+    except Exception:
+        pass  # Never crash the CLI for a version check
+
+
+# Register update banner as atexit handler so it runs via any entry point
+atexit.register(_show_update_banner)
 
 if __name__ == "__main__":
     app()

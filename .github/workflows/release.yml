@@ -38,6 +38,7 @@ jobs:
   # ── Preflight: detect release commit and create tag ────────
   preflight:
     name: Preflight checks
+    if: github.repository == 'BlazeUp-AI/Observal'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -80,6 +81,13 @@ jobs:
           PKG_VERSION=$(python3 -c "import re, pathlib; m = re.search(r'^version\s*=\s*\"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text(), re.M); print(m.group(1))")
           if [ "$VERSION" != "$PKG_VERSION" ]; then
             echo "::error::Release version v$VERSION does not match pyproject.toml ($PKG_VERSION)"
+            exit 1
+          fi
+
+          # Validate version matches web/package.json
+          WEB_VERSION=$(python3 -c "import json, pathlib; print(json.loads(pathlib.Path('web/package.json').read_text())['version'])")
+          if [ "$VERSION" != "$WEB_VERSION" ]; then
+            echo "::error::Release version v$VERSION does not match web/package.json ($WEB_VERSION)"
             exit 1
           fi
 
@@ -162,7 +170,7 @@ jobs:
         if: matrix.os == 'windows'
         run: mv dist/observal.exe dist/${{ matrix.artifact }}
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -214,7 +222,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: docker-digest-${{ matrix.image }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -231,7 +239,7 @@ jobs:
         image: [api, web]
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
           pattern: docker-digest-${{ matrix.image }}-*
@@ -286,7 +294,7 @@ jobs:
 
           tar -czf "observal-server-v${VERSION}.tar.gz" "$STAGING"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: observal-server-v${{ needs.preflight.outputs.version }}.tar.gz
           path: observal-server-v${{ needs.preflight.outputs.version }}.tar.gz
@@ -334,7 +342,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download release artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
           pattern: observal-*
