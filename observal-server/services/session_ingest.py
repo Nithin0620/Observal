@@ -14,13 +14,99 @@ default fallback.  Passing an unknown ``ide`` value raises ``KeyError``.
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import structlog
+from loguru import logger as optic
 
 from services.clickhouse import insert_session_events, query_existing_for_dedup, query_session_event_count
 from services.secrets_redactor import redact_secrets
 from services.session_parsers.ingest_classify import extract_timestamp, get_classifier, get_extra_rows
+
+# ---------------------------------------------------------------------------
+# Per-IDE token usage extraction (dispatch pattern)
+# ---------------------------------------------------------------------------
+
+
+def _usage_claude_code(parsed: dict) -> dict:
+    """Claude Code / Cursor / Kiro: usage.input_tokens, usage.output_tokens, etc."""
+    msg = parsed.get("message", {})
+    usage = msg.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "model": str(msg.get("model") or parsed.get("model") or ""),
+    }
+
+
+def _usage_pi(parsed: dict) -> dict:
+    """Pi: usage.input, usage.output, usage.cacheRead, usage.cacheWrite."""
+    msg = parsed.get("message", {})
+    usage = msg.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input") or 0),
+        "output_tokens": int(usage.get("output") or 0),
+        "cache_read_tokens": int(usage.get("cacheRead") or 0),
+        "cache_write_tokens": int(usage.get("cacheWrite") or 0),
+        "model": str(msg.get("model") or ""),
+    }
+
+
+_UsageFn = Callable[[dict], dict]
+
+_USAGE_EXTRACTORS: dict[str, _UsageFn] = {
+    "claude-code": _usage_claude_code,
+    "kiro": _usage_claude_code,
+    "cursor": _usage_claude_code,
+    "pi": _usage_pi,
+}
+
+
+# ---------------------------------------------------------------------------
+# Per-IDE UUID extraction (dispatch pattern)
+# ---------------------------------------------------------------------------
+
+
+def _uuid_default(parsed: dict) -> tuple[str | None, str | None]:
+    """Claude Code / Kiro / Cursor: uuid, parentUuid."""
+    return parsed.get("uuid"), parsed.get("parentUuid")
+
+
+def _uuid_pi(parsed: dict) -> tuple[str | None, str | None]:
+    """Pi: id, parentId (at entry level)."""
+    return parsed.get("id"), parsed.get("parentId")
+
+
+_UuidFn = Callable[[dict], "tuple[str | None, str | None]"]
+
+_UUID_EXTRACTORS: dict[str, _UuidFn] = {
+    "claude-code": _uuid_default,
+    "kiro": _uuid_default,
+    "cursor": _uuid_default,
+    "pi": _uuid_pi,
+}
+
+
+def _extract_usage_tokens(parsed: dict, ide: str = "claude-code") -> dict:
+    """Extract input/output/cache token counts and model from a parsed JSONL line.
+
+    Dispatches to per-IDE extractor. Falls back to Claude Code format.
+    """
+    extractor = _USAGE_EXTRACTORS.get(ide, _usage_claude_code)
+    return extractor(parsed)
+
+
+def _extract_uuid(parsed: dict, ide: str = "claude-code") -> tuple[str | None, str | None]:
+    """Extract (uuid, parent_uuid) from a parsed JSONL line.
+
+    Dispatches to per-IDE extractor. Falls back to Claude Code format.
+    """
+    extractor = _UUID_EXTRACTORS.get(ide, _uuid_default)
+    return extractor(parsed)
+
 
 logger = structlog.get_logger(__name__)
 
@@ -75,6 +161,7 @@ async def ingest_session_lines(
         An :class:`IngestResult` with ``ingested``, ``skipped``, and
         ``errors`` counts.
     """
+    optic.debug("ingest_session_lines: session_id={}, project_id={}", session_id, project_id)
     ingested = 0
     skipped = 0
     errors = 0
@@ -84,6 +171,7 @@ async def ingest_session_lines(
         extra = get_extra_rows(ide, session_id, project_id, user_id, agent_id, agent_version, total_credits)
         if extra:
             await insert_session_events(extra)
+        optic.debug("ingest skip: no lines provided for session={}", session_id)
         return IngestResult(ingested=0, skipped=0, errors=0)
 
     # Pre-check: fetch (existing_offsets, existing_hashes) for this batch range.
@@ -124,11 +212,19 @@ async def ingest_session_lines(
         redacted_line = redact_secrets(raw_line)
         preview = preview_fn(parsed, event_type)
         tool_name, tool_id = tool_info_fn(parsed)
+        uuid, parent_uuid = _extract_uuid(parsed, ide)
 
         ts = extract_timestamp(ide, parsed)
         if ts is not None:
             last_real_ts = ts
-        timestamp = ts if ts is not None else (last_real_ts if last_real_ts is not None else "2000-01-01 00:00:00.000")
+        if ts is not None:
+            timestamp = ts
+        elif last_real_ts is not None:
+            timestamp = last_real_ts
+        else:
+            from datetime import UTC, datetime
+
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
         rows.append(
             {
@@ -143,8 +239,8 @@ async def ingest_session_lines(
                 "line_hash": line_hash,
                 "event_type": event_type,
                 "timestamp": timestamp,
-                "uuid": parsed.get("uuid"),
-                "parent_uuid": parsed.get("parentUuid"),
+                "uuid": uuid,
+                "parent_uuid": parent_uuid,
                 "tool_name": tool_name,
                 "tool_id": tool_id,
                 "content_preview": preview,
@@ -152,12 +248,19 @@ async def ingest_session_lines(
                 "raw_line": redacted_line,
                 "credits": 0.0,
                 "parent_session_id": parent_session_id,
+                # Token counts from the JSONL line (IDE-specific field names).
+                **_extract_usage_tokens(parsed, ide),
             }
         )
         ingested += 1
 
     if rows:
         await insert_session_events(rows)
+        optic.debug(
+            "inserted {} rows into session_events for session={}",
+            len(rows),
+            session_id,
+        )
 
     # Store any IDE-specific extra rows (e.g. Kiro credits summary row).
     extra = get_extra_rows(ide, session_id, project_id, user_id, agent_id, agent_version, total_credits)
@@ -178,6 +281,7 @@ async def check_session_integrity(
     Queries ``SELECT count(), max(line_offset)`` for the session and
     compares against the expected values.
     """
+    optic.debug("check_session_integrity: session_id={}, project_id={}", session_id, project_id)
     stored_count, stored_max_offset = await query_session_event_count(session_id, project_id)
     ok = stored_count == expected_line_count and stored_max_offset == expected_offset
     return IntegrityResult(

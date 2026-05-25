@@ -329,14 +329,14 @@ class TestAgentConfigGenerator:
         return agent
 
     def test_injects_agent_id(self):
-        from services.agent_config_generator import generate_agent_config
+        from services.ide import generate_agent_config
 
         cfg = generate_agent_config(self._make_agent(), "cursor")
         mcp_cfg = cfg["mcp_config"]["content"]["mcpServers"]["ext-mcp"]
         assert mcp_cfg["env"]["OBSERVAL_AGENT_ID"] == "agent-xyz"
 
     def test_external_mcp_wrapped_with_shim(self):
-        from services.agent_config_generator import generate_agent_config
+        from services.ide import generate_agent_config
 
         cfg = generate_agent_config(self._make_agent(), "cursor")
         mcp_cfg = cfg["mcp_config"]["content"]["mcpServers"]["ext-mcp"]
@@ -344,7 +344,7 @@ class TestAgentConfigGenerator:
         assert "--mcp-id" in mcp_cfg["args"]
 
     def test_kiro_format(self):
-        from services.agent_config_generator import generate_agent_config
+        from services.ide import generate_agent_config
 
         cfg = generate_agent_config(self._make_agent(), "kiro")
         assert "agent_file" in cfg
@@ -358,14 +358,14 @@ class TestAgentConfigGenerator:
 
 
 class TestSanitizeSessionIds:
-    """Unit tests for ee.observal_insights.shim_enrichment._sanitize_session_ids."""
+    """Unit tests for services.insights.shim_enrichment._sanitize_session_ids."""
 
     def _get_fn(self):
         import os
         import sys
 
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ee"))
-        from observal_insights.shim_enrichment import _sanitize_session_ids
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "observal-server"))
+        from ee.observal_insights.shim_enrichment import _sanitize_session_ids
 
         return _sanitize_session_ids
 
@@ -420,12 +420,12 @@ class TestGetShimSpansAllInvalid:
         import os
         import sys
 
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ee"))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "observal-server"))
 
         mock_query_fn = AsyncMock()
 
-        with patch("observal_insights.shim_enrichment.get_query", return_value=mock_query_fn):
-            from observal_insights.shim_enrichment import get_shim_spans_for_sessions
+        with patch("ee.observal_insights.shim_enrichment.get_query", return_value=mock_query_fn):
+            from ee.observal_insights.shim_enrichment import get_shim_spans_for_sessions
 
             result = await get_shim_spans_for_sessions(
                 agent_name="test-agent",

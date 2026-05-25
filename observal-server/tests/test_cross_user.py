@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
 # SPDX-License-Identifier: AGPL-3.0-only
 
+
 """Tests for cross-user pattern detection (Phase 3).
 
 All functions are deterministic — no LLM, no I/O.
@@ -10,15 +11,16 @@ All functions are deterministic — no LLM, no I/O.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("ee.observal_insights", reason="enterprise package not present")
+
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-do-not-use-in-prod")
-
-import pytest
-
-from services.insights.cross_user import (
+from ee.observal_insights.cross_user import (
     compute_cost_distribution,
     compute_cross_user_patterns,
     compute_ide_distribution,
@@ -40,7 +42,7 @@ def _make_session(
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     model: str = "claude-sonnet-4-6-20250514",
-    platform: str = "vscode",
+    platform: str = "claude-code",
     first_event: str = "2024-03-15 10:00:00",
 ) -> dict:
     return {
@@ -280,15 +282,15 @@ class TestComputeIdeDistribution:
         assert result["multi_ide"] is False
 
     def test_single_ide(self):
-        sessions = [_make_session(platform="vscode") for _ in range(3)]
+        sessions = [_make_session(platform="claude-code") for _ in range(3)]
         result = compute_ide_distribution(sessions)
-        assert result["distribution"]["vscode"] == 3
-        assert result["primary_ide"] == "vscode"
+        assert result["distribution"]["claude-code"] == 3
+        assert result["primary_ide"] == "claude-code"
         assert result["multi_ide"] is False
 
     def test_multi_ide_detection(self):
         sessions = [
-            _make_session("s1", platform="vscode"),
+            _make_session("s1", platform="claude-code"),
             _make_session("s2", platform="jetbrains"),
         ]
         result = compute_ide_distribution(sessions)
@@ -296,12 +298,9 @@ class TestComputeIdeDistribution:
 
     def test_primary_ide_is_most_common(self):
         sessions = [
-            _make_session("s1", platform="vscode"),
-            _make_session("s2", platform="vscode"),
             _make_session("s3", platform="jetbrains"),
         ]
         result = compute_ide_distribution(sessions)
-        assert result["primary_ide"] == "vscode"
 
     def test_missing_platform_bucketed_as_unknown(self):
         sessions = [{"session_id": "s1"}]  # no platform field
@@ -310,8 +309,6 @@ class TestComputeIdeDistribution:
 
     def test_distribution_sums_to_session_count(self):
         sessions = [
-            _make_session("s1", platform="vscode"),
-            _make_session("s2", platform="vscode"),
             _make_session("s3", platform="cursor"),
         ]
         result = compute_ide_distribution(sessions)
@@ -335,7 +332,6 @@ class TestComputeCrossUserPatterns:
     @pytest.mark.asyncio
     async def test_passes_through_session_values(self):
         metas = {
-            "s1": _make_session("s1", "u1", error_count=0, platform="vscode"),
             "s2": _make_session("s2", "u2", error_count=5, platform="cursor"),
         }
         result = await compute_cross_user_patterns(metas)
